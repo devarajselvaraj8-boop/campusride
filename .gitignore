@@ -1,0 +1,27 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Service account credentials & server secrets
+secrets/
+*.pem
+*.key
+service-account*.json
+firebase-admin*.json
+
+# Node dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+# Binaries and local dev tools
+bin/
+*.exe
+

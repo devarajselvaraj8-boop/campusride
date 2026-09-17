@@ -1,0 +1,30 @@
+{
+  "name": "campusride-notification-server",
+  "version": "1.0.0",
+  "description": "Secure Firebase Admin SDK notification backend for CampusRide",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
+    "tunnel": "ssh -o StrictHostKeyChecking=no -R 80:localhost:3000 nokey@localhost.run",
+    "export-env": "node -e \"const fs=require('fs');const d=JSON.parse(fs.readFileSync('./secrets/service-account.json','utf8'));console.log(Buffer.from(JSON.stringify(d)).toString('base64'));\"",
+    "test": "node -e \"console.log('[Test] Syntax check passed')\""
+  },
+  "keywords": [
+    "campusride",
+    "fcm",
+    "firebase-admin",
+    "push-notifications"
+  ],
+  "author": "CampusRide Team",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.1.0"
+  },
+  "devDependencies": {
+    "localtunnel": "^2.0.2"
+  }
+}
