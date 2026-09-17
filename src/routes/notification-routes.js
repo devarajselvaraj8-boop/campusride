@@ -341,7 +341,7 @@ router.post('/notify-ride-join', async (req, res) => {
       }
     } catch (_) {}
 
-    const notifTitle = 'New passenger joined';
+    const notifTitle = 'New friend joined';
     const notifBody = `${joinerName} joined your ride to ${destination}.`;
 
     // 8. Create In-App Notification document for creator
@@ -498,8 +498,36 @@ router.post('/notify-ride-leave', async (req, res) => {
       });
     }
 
-    // 6. Duplicate prevention / Idempotency check:
-    // Check if a ride_left notification was already created for this ride and participant
+    // 6. Secure verification: Verify that participant genuinely joined this ride previously
+    // Distinguishes "participant genuinely left" from "participant never existed"
+    const leaveEventRef = db
+      .collection('rides')
+      .doc(rideId)
+      .collection('leave_events')
+      .doc(participantId);
+    const leaveEventDoc = await leaveEventRef.get();
+
+    if (!leaveEventDoc.exists) {
+      const priorJoinNotifSnap = await db
+        .collection('users')
+        .doc(creatorId)
+        .collection('notifications')
+        .where('type', '==', 'ride_joined')
+        .where('rideId', '==', rideId)
+        .where('participantId', '==', participantId)
+        .limit(1)
+        .get();
+
+      if (priorJoinNotifSnap.empty) {
+        return res.status(400).json({
+          success: false,
+          error: 'Verification failed: Participant was not a member of this ride.',
+        });
+      }
+    }
+
+    // 7. Duplicate prevention / Idempotency check:
+    // Check if a ride_left notification or leave_event was already created for this ride and participant
     const existingNotifSnap = await db
       .collection('users')
       .doc(creatorId)
@@ -510,7 +538,7 @@ router.post('/notify-ride-leave', async (req, res) => {
       .limit(1)
       .get();
 
-    if (!existingNotifSnap.empty) {
+    if (!existingNotifSnap.empty || leaveEventDoc.exists) {
       console.log(`[FCM] Duplicate leave notification suppressed for ride ${rideId} and participant ${participantId}`);
       return res.status(200).json({
         success: true,
@@ -519,7 +547,14 @@ router.post('/notify-ride-leave', async (req, res) => {
       });
     }
 
-    // 7. Retrieve participant profile name
+    // Record persistent leave event
+    await leaveEventRef.set({
+      participantId: participantId,
+      rideId: rideId,
+      leftAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // 8. Retrieve participant profile name
     let leaverName = 'A passenger';
     try {
       const userDoc = await db.collection('users').doc(participantId).get();
