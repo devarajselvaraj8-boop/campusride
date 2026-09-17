@@ -404,5 +404,194 @@ router.post('/notify-ride-join', async (req, res) => {
   }
 });
 
+/**
+ * Ride Leave Notification Endpoint
+ * POST /notify-ride-leave
+ * 
+ * Body: { "rideId": "...", "participantId": "..." }
+ * Headers:
+ *   Authorization: Bearer <ID_TOKEN> (or x-dev-secret in dev)
+ */
+router.post('/notify-ride-leave', async (req, res) => {
+  // 1. Authenticate request (Bearer Firebase ID token or dev secret)
+  const configuredSecret = process.env.DEV_TEST_SECRET || 'campusride_dev_test_secret_key_change_me';
+  const providedSecret = req.headers['x-dev-secret'];
+  const authHeader = req.headers.authorization;
+
+  let authenticatedUid = null;
+
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const idToken = authHeader.split('Bearer ')[1].trim();
+    if (idToken) {
+      try {
+        const decoded = await admin.auth().verifyIdToken(idToken);
+        authenticatedUid = decoded.uid;
+      } catch (err) {
+        console.warn('[Auth] ID token verification failed in /notify-ride-leave:', err.code || err.message);
+      }
+    }
+  }
+
+  const isDevSecretValid = configuredSecret && providedSecret === configuredSecret;
+
+  if (!authenticatedUid && !isDevSecretValid) {
+    return res.status(401).json({
+      success: false,
+      error: 'Unauthorized: Valid Firebase ID token or dev secret required.',
+    });
+  }
+
+  // 2. Validate input parameters
+  const { rideId, participantId } = req.body;
+  if (!rideId || typeof rideId !== 'string' || !participantId || typeof participantId !== 'string') {
+    return res.status(400).json({
+      success: false,
+      error: 'Invalid request: "rideId" and "participantId" strings are required.',
+    });
+  }
+
+  // Enforce that caller is the participant (no impersonation) unless using dev secret
+  if (authenticatedUid && authenticatedUid !== participantId && !isDevSecretValid) {
+    return res.status(403).json({
+      success: false,
+      error: 'Forbidden: Authenticated UID does not match participantId.',
+    });
+  }
+
+  try {
+    const db = admin.firestore();
+
+    // 3. Verify ride exists
+    const rideDoc = await db.collection('rides').doc(rideId).get();
+    if (!rideDoc.exists) {
+      return res.status(404).json({
+        success: false,
+        error: 'Ride not found.',
+      });
+    }
+
+    const rideData = rideDoc.data() || {};
+    const creatorId = rideData.creatorId;
+    const destination = rideData.destination || 'destination';
+
+    // 4. Do not notify if participant is the creator (creators cancel, not leave)
+    if (participantId === creatorId) {
+      console.log(`[FCM] Leaving user is ride creator (${creatorId}). Self-notification suppressed.`);
+      return res.status(200).json({
+        success: true,
+        message: 'Creator leave self-notification suppressed.',
+      });
+    }
+
+    // 5. Verify the leave actually happened: participant must NOT be currently in participants collection
+    const participantDoc = await db
+      .collection('rides')
+      .doc(rideId)
+      .collection('participants')
+      .doc(participantId)
+      .get();
+
+    if (participantDoc.exists) {
+      return res.status(400).json({
+        success: false,
+        error: 'Participant has not left this ride (participant document still exists).',
+      });
+    }
+
+    // 6. Duplicate prevention / Idempotency check:
+    // Check if a ride_left notification was already created for this ride and participant
+    const existingNotifSnap = await db
+      .collection('users')
+      .doc(creatorId)
+      .collection('notifications')
+      .where('type', '==', 'ride_left')
+      .where('rideId', '==', rideId)
+      .where('participantId', '==', participantId)
+      .limit(1)
+      .get();
+
+    if (!existingNotifSnap.empty) {
+      console.log(`[FCM] Duplicate leave notification suppressed for ride ${rideId} and participant ${participantId}`);
+      return res.status(200).json({
+        success: true,
+        message: 'Duplicate leave notification suppressed.',
+        duplicate: true,
+      });
+    }
+
+    // 7. Retrieve participant profile name
+    let leaverName = 'A passenger';
+    try {
+      const userDoc = await db.collection('users').doc(participantId).get();
+      if (userDoc.exists) {
+        const uData = userDoc.data() || {};
+        leaverName = uData.name || uData.email || 'A passenger';
+      }
+    } catch (_) {}
+
+    const notifTitle = 'Passenger left your ride';
+    const notifBody = `${leaverName} left your ride to ${destination}.`;
+
+    // 8. Create In-App Notification document for creator
+    const notifRef = db.collection('users').doc(creatorId).collection('notifications').doc();
+    await notifRef.set({
+      notificationId: notifRef.id,
+      userId: creatorId,
+      title: notifTitle,
+      body: notifBody,
+      type: 'ride_left',
+      rideId: rideId,
+      participantId: participantId,
+      isRead: false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    console.log(`[FCM] In-app leave notification created for creator ${creatorId}`);
+
+    // 9. Multi-device FCM Push Notification dispatch
+    const devices = await getUserDeviceTokens(creatorId);
+    if (devices.length === 0) {
+      console.log(`[FCM] Creator [${creatorId}] has 0 active device tokens`);
+      return res.status(200).json({
+        success: true,
+        sentCount: 0,
+        totalDevices: 0,
+        message: 'In-app notification created; creator has no registered devices.',
+      });
+    }
+
+    console.log(`[FCM] Dispatching leave push notification to ${devices.length} device(s) for creator [${creatorId}]`);
+    const results = await Promise.all(
+      devices.map(device =>
+        sendPushNotification({
+          token: device.token,
+          title: notifTitle,
+          body: notifBody,
+          data: {
+            type: 'ride_left',
+            rideId: rideId,
+            participantId: participantId,
+          },
+          userId: creatorId,
+        })
+      )
+    );
+
+    const successCount = results.filter(r => r.success).length;
+    console.log(`[FCM] Ride leave notification delivered to ${successCount}/${devices.length} devices for creator [${creatorId}]`);
+
+    return res.status(200).json({
+      success: true,
+      sentCount: successCount,
+      totalDevices: devices.length,
+    });
+  } catch (error) {
+    console.error('[API] Error in /notify-ride-leave:', error.message);
+    return res.status(500).json({
+      success: false,
+      error: 'Internal server error while processing ride leave notification',
+    });
+  }
+});
+
 module.exports = router;
 
