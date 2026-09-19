@@ -585,7 +585,7 @@ router.post('/notify-ride-leave', async (req, res) => {
     // 9. Multi-device FCM Push Notification dispatch
     const devices = await getUserDeviceTokens(creatorId);
     if (devices.length === 0) {
-      console.log(`[FCM] Creator [${creatorId}] has 0 active device tokens`);
+      console.log(`[LEAVE_FCM] recipient=${creatorId} devices=0 success=0 failure=0 message=no_registered_devices`);
       return res.status(200).json({
         success: true,
         sentCount: 0,
@@ -594,7 +594,7 @@ router.post('/notify-ride-leave', async (req, res) => {
       });
     }
 
-    console.log(`[FCM] Dispatching leave push notification to ${devices.length} device(s) for creator [${creatorId}]`);
+    console.log(`[LEAVE_FCM] recipient=${creatorId} devices=${devices.length}`);
     const results = await Promise.all(
       devices.map(device =>
         sendPushNotification({
@@ -612,7 +612,9 @@ router.post('/notify-ride-leave', async (req, res) => {
     );
 
     const successCount = results.filter(r => r.success).length;
-    console.log(`[FCM] Ride leave notification delivered to ${successCount}/${devices.length} devices for creator [${creatorId}]`);
+    const failureCount = results.length - successCount;
+    const errors = results.filter(r => !r.success).map(r => r.error).join('; ');
+    console.log(`[LEAVE_FCM] recipient=${creatorId} devices=${devices.length} success=${successCount} failure=${failureCount}${errors ? ` errors=${errors}` : ''}`);
 
     return res.status(200).json({
       success: true,
